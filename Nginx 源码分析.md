@@ -3872,3 +3872,70 @@ typedef struct {
     char                    **environment;
 } ngx_core_conf_t;
 ```
+
+#### 3.初始化过程
+
+##### 1.创建一个内存池
+
+```c
+/* 创建一块内存 */
+pool = ngx_create_pool(NGX_CYCLE_POOL_SIZE, log);
+if (pool == NULL) {
+    return NULL;
+}
+pool->log = log;
+
+cycle = ngx_pcalloc(pool, sizeof(ngx_cycle_t));
+if (cycle == NULL) {
+    ngx_destroy_pool(pool);
+    return NULL;
+}
+
+cycle->pool = pool;
+cycle->log = log;
+cycle->old_cycle = old_cycle;
+```
+
+##### 2.拷贝配置文件的路径前缀(/usr/local/nginx)
+
+主要拷贝cycle->conf_prefix
+
+```c
+* 配置文件路径拷贝 /usr/local/nginx/ */
+cycle->conf_prefix.len = old_cycle->conf_prefix.len;
+cycle->conf_prefix.data = ngx_pstrdup(pool, &old_cycle->conf_prefix);
+if (cycle->conf_prefix.data == NULL) {
+	ngx_destroy_pool(pool);
+return NULL;
+```
+
+##### 3.Nginx的路径前缀拷贝
+
+拷贝到cycle->prefix
+
+```c
+ /* Nginx路径拷贝 */
+ cycle->prefix.len = old_cycle->prefix.len;
+ cycle->prefix.data = ngx_pstrdup(pool, &old_cycle->prefix);
+ if (cycle->prefix.data == NULL) {
+     ngx_destroy_pool(pool);
+     return NULL;
+ }
+```
+
+##### 4.拷贝配置文件信息
+
+/nginx/conf/nginx.conf 文件路径
+
+```c
+/* 配置文件 信息拷贝*/
+cycle->conf_file.len = old_cycle->conf_file.len;
+cycle->conf_file.data = ngx_pnalloc(pool, old_cycle->conf_file.len + 1);
+if (cycle->conf_file.data == NULL) {
+    ngx_destroy_pool(pool);
+    return NULL;
+}
+ngx_cpystrn(cycle->conf_file.data, old_cycle->conf_file.data,
+            old_cycle->conf_file.len + 1);
+```
+
