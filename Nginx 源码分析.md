@@ -3939,3 +3939,147 @@ ngx_cpystrn(cycle->conf_file.data, old_cycle->conf_file.data,
             old_cycle->conf_file.len + 1);
 ```
 
+##### 5.拷贝配置参数信息。
+
+```
+ /* 配置参数 信息拷贝 */
+ cycle->conf_param.len = old_cycle->conf_param.len;
+ cycle->conf_param.data = ngx_pstrdup(pool, &old_cycle->conf_param);
+ if (cycle->conf_param.data == NULL) {
+     ngx_destroy_pool(pool);
+     return NULL;
+ }
+```
+
+##### 6.路径信息初始化
+
+```c
+ /* 路径信息 */
+    n = old_cycle->paths.nelts ? old_cycle->paths.nelts : 10;
+ 
+    cycle->paths.elts = ngx_pcalloc(pool, n * sizeof(ngx_path_t *));
+    if (cycle->paths.elts == NULL) {
+        ngx_destroy_pool(pool);
+        return NULL;
+    }
+ 
+    cycle->paths.nelts = 0;
+    cycle->paths.size = sizeof(ngx_path_t *);
+    cycle->paths.nalloc = n;
+    cycle->paths.pool = pool;
+ 
+ 
+    if (ngx_array_init(&cycle->config_dump, pool, 1, sizeof(ngx_conf_dump_t))
+        != NGX_OK)
+    {
+        ngx_destroy_pool(pool);
+        return NULL;
+    }
+
+```
+
+##### 7.初始化打开的文件句柄
+
+```c
+ /* 初始化打开的文件句柄 */
+    if (old_cycle->open_files.part.nelts) {
+        n = old_cycle->open_files.part.nelts;
+        for (part = old_cycle->open_files.part.next; part; part = part->next) {
+            n += part->nelts;
+        }
+ 
+    } else {
+        n = 20;
+    }
+ 
+    if (ngx_list_init(&cycle->open_files, pool, n, sizeof(ngx_open_file_t))
+        != NGX_OK)
+    {
+        ngx_destroy_pool(pool);
+        return NULL;
+	}
+```
+
+##### 8.初始化shared_memory链表
+
+```c
+ /* 初始化shared_memory链表 */
+    if (old_cycle->shared_memory.part.nelts) {
+        n = old_cycle->shared_memory.part.nelts;
+        for (part = old_cycle->shared_memory.part.next; part; part = part->next)
+        {
+            n += part->nelts;
+        }
+ 
+    } else {
+        n = 1;
+    }
+ 
+    if (ngx_list_init(&cycle->shared_memory, pool, n, sizeof(ngx_shm_zone_t))
+        != NGX_OK)
+    {
+        ngx_destroy_pool(pool);
+        return NULL;
+    }
+```
+
+##### 9.初始化listening数组
+
+```c
+/* 初始化listening */
+    n = old_cycle->listening.nelts ? old_cycle->listening.nelts : 10;
+ 
+    cycle->listening.elts = ngx_pcalloc(pool, n * sizeof(ngx_listening_t));
+    if (cycle->listening.elts == NULL) {
+        ngx_destroy_pool(pool);
+        return NULL;
+    }
+ 
+    cycle->listening.nelts = 0;
+    cycle->listening.size = sizeof(ngx_listening_t);
+    cycle->listening.nalloc = n;
+    cycle->listening.pool = pool;
+```
+
+##### 10.模块创建和核心配置结构初始化ngx_core_conf_t
+
+​	主要初始化cycle->modules
+
+​	创建核心配置结构，Nginx的核心配置会放到**ngx_core_conf_t  \*ccf**数据结构上
+
+​	初始化核心配置结构**ngx_core_conf_t  \***
+
+/* 创建模块以及创建模块的配置信息 */
+    if (ngx_cycle_modules(cycle) != NGX_OK) {
+        ngx_destroy_pool(pool);
+        return NULL;
+    }
+
+```C
+/*
+ * 核心模块的配置文件创建
+ * 配置创建调用nginx.c 中的 ngx_core_module_create_conf
+ * */
+for (i = 0; cycle->modules[i]; i++) {
+    if (cycle->modules[i]->type != NGX_CORE_MODULE) {
+        continue;
+    }
+ 
+    module = cycle->modules[i]->ctx;
+ 
+    if (module->create_conf) {
+        rv = module->create_conf(cycle); //模块回调函数，创建模块的配置信息
+        if (rv == NULL) {
+            ngx_destroy_pool(pool);
+            return NULL;
+        }
+        cycle->conf_ctx[cycle->modules[i]->index] = rv; //配置文件复制
+    }
+}
+```
+
+```C
+/* 获取核心配置文件的数据结构 ngx_core_conf_t */
+    ccf = (ngx_core_conf_t *) ngx_get_conf(cycle->conf_ctx, ngx_core_module);
+```
+
