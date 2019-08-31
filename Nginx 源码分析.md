@@ -4047,15 +4047,14 @@ ngx_cpystrn(cycle->conf_file.data, old_cycle->conf_file.data,
 
 ​	创建核心配置结构，Nginx的核心配置会放到**ngx_core_conf_t  \*ccf**数据结构上
 
-​	初始化核心配置结构**ngx_core_conf_t  \***
-
-/* 创建模块以及创建模块的配置信息 */
-    if (ngx_cycle_modules(cycle) != NGX_OK) {
-        ngx_destroy_pool(pool);
-        return NULL;
-    }
+​	初始化核心配置结构**ngx_core_conf_t  **
 
 ```C
+/* 创建模块以及创建模块的配置信息 */
+if (ngx_cycle_modules(cycle) != NGX_OK) {
+    ngx_destroy_pool(pool);
+    return NULL;
+}
 /*
  * 核心模块的配置文件创建
  * 配置创建调用nginx.c 中的 ngx_core_module_create_conf
@@ -4081,5 +4080,406 @@ for (i = 0; cycle->modules[i]; i++) {
 ```C
 /* 获取核心配置文件的数据结构 ngx_core_conf_t */
     ccf = (ngx_core_conf_t *) ngx_get_conf(cycle->conf_ctx, ngx_core_module);
+```
+
+##### 11.配置文件nginx.conf解析
+
+```c
+ /* 解析配置文件 */
+    ngx_memzero(&conf, sizeof(ngx_conf_t));
+    /* STUB: init array ? */
+    conf.args = ngx_array_create(pool, 10, sizeof(ngx_str_t));
+    if (conf.args == NULL) {
+        ngx_destroy_pool(pool);
+        return NULL;
+    }
+ 
+    /* 创建一个临时的内存池，后面会清空掉;conf也主要用于解析配置文件的临时变量 */
+    conf.temp_pool = ngx_create_pool(NGX_CYCLE_POOL_SIZE, log);
+    if (conf.temp_pool == NULL) {
+        ngx_destroy_pool(pool);
+        return NULL;
+    }
+ 
+ 
+    conf.ctx = cycle->conf_ctx;
+    conf.cycle = cycle;
+    conf.pool = pool;
+    conf.log = log;
+    conf.module_type = NGX_CORE_MODULE;
+    conf.cmd_type = NGX_MAIN_CONF;
+ 
+#if 0
+    log->log_level = NGX_LOG_DEBUG_ALL;
+#endif
+ 
+    /* 解析命令行中的配置参数；例如：nginx -t -c /usr/local/nginx/conf/nginx.conf */
+    if (ngx_conf_param(&conf) != NGX_CONF_OK) {
+        environ = senv;
+        ngx_destroy_cycle_pools(&conf);
+        return NULL;
+    }
+ 
+    /* 解析配置文件/usr/local/nginx/conf/nginx.conf 信息 */
+    if (ngx_conf_parse(&conf, &cycle->conf_file) != NGX_CONF_OK) {
+        environ = senv;
+        ngx_destroy_cycle_pools(&conf);
+        return NULL;
+    }
+ 
+    if (ngx_test_config && !ngx_quiet_mode) {
+        ngx_log_stderr(0, "the configuration file %s syntax is ok",
+                       cycle->conf_file.data);
+    }
+```
+
+##### 12. 创建PID文件
+
+Nginx将PID写入文件内，**/usr/local/nginx/nginx.pid**，后续对Nginx进行重启、停止、信号操作就可以使用这个PID了。
+
+```c
+ /* 创建pid文件，/usr/local/nginx-1.4.7/nginx.pid*/
+    if (ngx_test_config) {
+ 
+        if (ngx_create_pidfile(&ccf->pid, log) != NGX_OK) {
+            goto failed;
+        }
+ 
+    } else if (!ngx_is_init_cycle(old_cycle)) {
+ 
+        /*
+         * we do not create the pid file in the first ngx_init_cycle() call
+         * because we need to write the demonized process pid
+         */
+ 
+        old_ccf = (ngx_core_conf_t *) ngx_get_conf(old_cycle->conf_ctx,
+                                                   ngx_core_module);
+        if (ccf->pid.len != old_ccf->pid.len
+            || ngx_strcmp(ccf->pid.data, old_ccf->pid.data) != 0)
+        {
+            /* new pid file name */
+ 
+            if (ngx_create_pidfile(&ccf->pid, log) != NGX_OK) {
+                goto failed;
+            }
+ 
+            ngx_delete_pidfile(old_cycle);
+        }
+
+```
+
+##### 13.遍历cycle->open_files链表中的文件，并且打开
+
+```c
+/* 打开日志，并调用ngx_conf_open_file方法，会将打开的文件放到cycle->open_files链表中 主要是日志文件和配置文件*/
+    if (ngx_log_open_default(cycle) != NGX_OK) {
+        goto failed;
+    }
+```
+
+```c
+ /* 遍历cycle->open_files链表中的文件，并打开 */
+    part = &cycle->open_files.part;
+    file = part->elts;
+ 
+    for (i = 0; /* void */ ; i++) {
+ 
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                break;
+            }
+            part = part->next;
+            file = part->elts;
+            i = 0;
+        }
+ 
+        if (file[i].name.len == 0) {
+            continue;
+        }
+ 
+        file[i].fd = ngx_open_file(file[i].name.data,
+                                   NGX_FILE_APPEND,
+                                   NGX_FILE_CREATE_OR_OPEN,
+                                   NGX_FILE_DEFAULT_ACCESS);
+ 
+        ngx_log_debug3(NGX_LOG_DEBUG_CORE, log, 0,
+                       "log: %p %d \"%s\"",
+                       &file[i], file[i].fd, file[i].name.data);
+ 
+        if (file[i].fd == NGX_INVALID_FILE) {
+            ngx_log_error(NGX_LOG_EMERG, log, ngx_errno,
+                          ngx_open_file_n " \"%s\" failed",
+                          file[i].name.data);
+            goto failed;
+        }
+ 
+#if !(NGX_WIN32)
+        if (fcntl(file[i].fd, F_SETFD, FD_CLOEXEC) == -1) {
+            ngx_log_error(NGX_LOG_EMERG, log, ngx_errno,
+                          "fcntl(FD_CLOEXEC) \"%s\" failed",
+                          file[i].name.data);
+            goto failed;
+        }
+#endif
+    }
+```
+
+##### 14.创建共享内存并初始化
+
+​	新旧shared_memory链表的比较，相同的共享内存保留，旧的不同的共享内存被释放，新的被创建
+
+```c
+/* 创建共享内存并初始化 */
+    part = &cycle->shared_memory.part;
+    shm_zone = part->elts;
+ 
+    for (i = 0; /* void */ ; i++) {
+ 
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                break;
+            }
+            part = part->next;
+            shm_zone = part->elts;
+            i = 0;
+        }
+ 
+        if (shm_zone[i].shm.size == 0) {
+            ngx_log_error(NGX_LOG_EMERG, log, 0,
+                          "zero size shared memory zone \"%V\"",
+                          &shm_zone[i].shm.name);
+            goto failed;
+        }
+ 
+        shm_zone[i].shm.log = cycle->log;
+ 
+        opart = &old_cycle->shared_memory.part;
+        oshm_zone = opart->elts;
+ 
+        for (n = 0; /* void */ ; n++) {
+ 
+            if (n >= opart->nelts) {
+                if (opart->next == NULL) {
+                    break;
+                }
+                opart = opart->next;
+                oshm_zone = opart->elts;
+                n = 0;
+            }
+ 
+            if (shm_zone[i].shm.name.len != oshm_zone[n].shm.name.len) {
+                continue;
+            }
+ 
+            if (ngx_strncmp(shm_zone[i].shm.name.data,
+                            oshm_zone[n].shm.name.data,
+                            shm_zone[i].shm.name.len)
+                != 0)
+            {
+                continue;
+            }
+ 
+            if (shm_zone[i].tag == oshm_zone[n].tag
+                && shm_zone[i].shm.size == oshm_zone[n].shm.size
+                && !shm_zone[i].noreuse)
+            {
+                shm_zone[i].shm.addr = oshm_zone[n].shm.addr;
+#if (NGX_WIN32)
+                shm_zone[i].shm.handle = oshm_zone[n].shm.handle;
+#endif
+ 
+                if (shm_zone[i].init(&shm_zone[i], oshm_zone[n].data)
+                    != NGX_OK)
+                {
+                    goto failed;
+                }
+ 
+                goto shm_zone_found;
+            }
+ 
+            ngx_shm_free(&oshm_zone[n].shm);
+ 
+            break;
+        }
+```
+
+##### 15.处理listening数组，并开始监听socket
+
+```C
+/* handle the listening sockets */
+    /* 处理listening数组，并开始监听socket */
+    if (old_cycle->listening.nelts) {
+        ls = old_cycle->listening.elts;
+        for (i = 0; i < old_cycle->listening.nelts; i++) {
+            ls[i].remain = 0;
+        }
+ 
+        nls = cycle->listening.elts;
+        for (n = 0; n < cycle->listening.nelts; n++) {
+ 
+            for (i = 0; i < old_cycle->listening.nelts; i++) {
+                if (ls[i].ignore) {
+                    continue;
+                }
+ 
+                if (ls[i].remain) {
+                    continue;
+                }
+ 
+                if (ls[i].type != nls[n].type) {
+                    continue;
+                }
+ 
+                if (ngx_cmp_sockaddr(nls[n].sockaddr, nls[n].socklen,
+                                     ls[i].sockaddr, ls[i].socklen, 1)
+                    == NGX_OK)
+                {
+                    nls[n].fd = ls[i].fd;
+                    nls[n].previous = &ls[i];
+                    ls[i].remain = 1;
+ 
+                    if (ls[i].backlog != nls[n].backlog) {
+                        nls[n].listen = 1;
+                    }
+ 
+#if (NGX_HAVE_DEFERRED_ACCEPT && defined SO_ACCEPTFILTER)
+ 
+                    /*
+                     * FreeBSD, except the most recent versions,
+                     * could not remove accept filter
+                     */
+                    nls[n].deferred_accept = ls[i].deferred_accept;
+ 
+                    if (ls[i].accept_filter && nls[n].accept_filter) {
+                        if (ngx_strcmp(ls[i].accept_filter,
+                                       nls[n].accept_filter)
+                            != 0)
+                        {
+                            nls[n].delete_deferred = 1;
+                            nls[n].add_deferred = 1;
+                        }
+ 
+                    } else if (ls[i].accept_filter) {
+                        nls[n].delete_deferred = 1;
+ 
+                    } else if (nls[n].accept_filter) {
+                        nls[n].add_deferred = 1;
+                    }
+#endif
+ 
+#if (NGX_HAVE_DEFERRED_ACCEPT && defined TCP_DEFER_ACCEPT)
+ 
+                    if (ls[i].deferred_accept && !nls[n].deferred_accept) {
+                        nls[n].delete_deferred = 1;
+ 
+                    } else if (ls[i].deferred_accept != nls[n].deferred_accept)
+                    {
+                        nls[n].add_deferred = 1;
+                    }
+#endif
+ 
+#if (NGX_HAVE_REUSEPORT)
+                    if (nls[n].reuseport && !ls[i].reuseport) {
+                        nls[n].add_reuseport = 1;
+                    }
+#endif
+ 
+                    break;
+                }
+            }
+ 
+            if (nls[n].fd == (ngx_socket_t) -1) {
+                nls[n].open = 1;
+#if (NGX_HAVE_DEFERRED_ACCEPT && defined SO_ACCEPTFILTER)
+                if (nls[n].accept_filter) {
+                    nls[n].add_deferred = 1;
+                }
+#endif
+#if (NGX_HAVE_DEFERRED_ACCEPT && defined TCP_DEFER_ACCEPT)
+                if (nls[n].deferred_accept) {
+                    nls[n].add_deferred = 1;
+                }
+#endif
+            }
+        }
+ 
+    } else {
+        ls = cycle->listening.elts;
+        for (i = 0; i < cycle->listening.nelts; i++) {
+            ls[i].open = 1;
+#if (NGX_HAVE_DEFERRED_ACCEPT && defined SO_ACCEPTFILTER)
+            if (ls[i].accept_filter) {
+                ls[i].add_deferred = 1;
+            }
+#endif
+#if (NGX_HAVE_DEFERRED_ACCEPT && defined TCP_DEFER_ACCEPT)
+            if (ls[i].deferred_accept) {
+                ls[i].add_deferred = 1;
+            }
+#endif
+        }
+    }
+ 
+    if (ngx_open_listening_sockets(cycle) != NGX_OK) {
+        goto failed;
+    }
+ 
+    if (!ngx_test_config) {
+        ngx_configure_listening_sockets(cycle);
+    }
+```
+
+##### 16.关闭或删除残留在old_cycle中的资源
+
+1. 释放多余的共享内存;
+
+2. 关闭多余的侦听sockets;
+
+3. 关闭多余的打开文件
+
+```c
+/* close and delete stuff that lefts from an old cycle */
+ 
+    /* free the unnecessary shared memory */
+    /* 关闭或删除残留在old_cycle中的资源 释放多余的共享内存;关闭多余的侦听sockets;关闭多余的打开文件*/
+    opart = &old_cycle->shared_memory.part;
+    oshm_zone = opart->elts;
+ 
+    for (i = 0; /* void */ ; i++) {
+ 
+        if (i >= opart->nelts) {
+            if (opart->next == NULL) {
+                goto old_shm_zone_done;
+            }
+            opart = opart->next;
+            oshm_zone = opart->elts;
+            i = 0;
+        }
+ 
+        part = &cycle->shared_memory.part;
+        shm_zone = part->elts;
+ 
+        for (n = 0; /* void */ ; n++) {
+ 
+            if (n >= part->nelts) {
+                if (part->next == NULL) {
+                    break;
+                }
+                part = part->next;
+                shm_zone = part->elts;
+                n = 0;
+            }
+ 
+            if (oshm_zone[i].shm.name.len == shm_zone[n].shm.name.len
+                && ngx_strncmp(oshm_zone[i].shm.name.data,
+                               shm_zone[n].shm.name.data,
+                               oshm_zone[i].shm.name.len)
+                == 0)
+            {
+                goto live_shm_zone;
+            }
+        }
+ 
+        ngx_shm_free(&oshm_zone[i].shm);
 ```
 
