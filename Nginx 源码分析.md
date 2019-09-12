@@ -4483,3 +4483,238 @@ Nginx将PID写入文件内，**/usr/local/nginx/nginx.pid**，后续对Nginx进�
         ngx_shm_free(&oshm_zone[i].shm);
 ```
 
+### 12.Nginx模块初始化
+
+​	Nginx是高度模块化的，各个功能都会封装在模块中。例如core模块、HTTP模块等。也可以自定义模块。
+
+这一篇文章主要讲解模块的初始化。后续会有一篇文章教你如何编写Nginx的模块。
+
+Nginx实现模块管理的代码主要在：**/src/core/ngx_module.c**文件中。
+
+#### 1.ngx_module_s模块
+
+​	结构体ngx_module_s主要用于管理每一个模块的详细信息。
+
+​	Nginx的所有模块会放置在全局变量cycle的**cycle->modules** 模块数组。通过这个数组，我们就可以拿到每个模块的具体信息。
+
+```c
+struct ngx_module_s {
+    ngx_uint_t            ctx_index; 	// 所属分类标识.Nginx的模块分为4种，分别是core，http，event和mail,每个模块在使用的技术各不尽相同
+    ngx_uint_t            index;	 	//模块计数器，Nginx为了方便管理模块，定义了一个存放所有模块的数组ngx_modules[];
+	// /objs/ngx_modules.c包含了此版本快速编译后所有模块的声明。
+    ngx_uint_t            spare0;
+    ngx_uint_t            spare1;
+    ngx_uint_t            spare2;
+    ngx_uint_t            spare3;
+
+    ngx_uint_t            version;	 	//模块版本
+
+    void                 *ctx;		 	//模块上下文，不同模块的模块上下文结构不同
+    ngx_command_t        *commands;		// 模块支持的命令集	
+    ngx_uint_t            type;			// 模块的种类
+
+	//回调函数  如果该模块需要发生这些行为时执行特定的功能，可以通过这些回调函数指针注册一个回调函数接口
+    ngx_int_t           (*init_master)(ngx_log_t *log);			// 主进程初始化时调用
+
+    ngx_int_t           (*init_module)(ngx_cycle_t *cycle);		// 模块初始化时调用
+
+    ngx_int_t           (*init_process)(ngx_cycle_t *cycle);	// 工作进程初始化时调用
+    ngx_int_t           (*init_thread)(ngx_cycle_t *cycle);		// 线程初始化时调用
+    void                (*exit_thread)(ngx_cycle_t *cycle);		// 线程退出时调用
+    void                (*exit_process)(ngx_cycle_t *cycle);	// 工作进程退出时调用
+
+    void                (*exit_master)(ngx_cycle_t *cycle);		// 主进程退出时调用
+
+	//预留未使用
+    uintptr_t             spare_hook0;
+    uintptr_t             spare_hook1;
+    uintptr_t             spare_hook2;
+    uintptr_t             spare_hook3;
+    uintptr_t             spare_hook4;
+    uintptr_t             spare_hook5;
+    uintptr_t             spare_hook6;
+    uintptr_t             spare_hook7;
+};
+```
+
+说明：
+
+1.index 主要用于模块的标识。
+
+​	cycle->conf_ctx主要存储的是各个模块的配置文件结构的指针地址。
+
+​	cycle->conf_ctx中获取各个模块配置信息都是通过模块的标识来确定数组位置的。
+
+​	例如核心模块是放在一个ngx_core_conf_t的数据结构上的。而ngx_core_conf_t这个指针就通过index索引值放在cycle->conf_ctx数组中。
+
+获取核心模块的配置信息：
+
+```c
+ccf = (ngx_core_conf_t *) ngx_get_conf(cycle->conf_ctx, ngx_core_module);
+```
+
+2.commands主要用于配置模块的命令集。Nginx的配置文件都是通过commands命令集来逐个解析具体定义好的配置信息（每个模块不一样）。下一章会详解解读
+
+3.ctx 模块上下文。主要放置一个模块自定义的结构。例如核心模块就是ngx_core_module_t的结构。ngx_core_module_t中可以自定义一些方法或者参数。
+
+3.type。模块类型。
+
+4.nit_module：初始化模块的时候会回调的函数。
+
+#### 2.ngx_core_module 核心模块
+
+​	核心模块在nginx.c的头部就定义了。定义了 ngx_core_module核心模块和核心模块的上下文ngx_core_module_ctx
+
+​	ngx_core_module_t 为核心模块的上下文结构。主要用于核心模块的配置文件创建ngx_core_module_create_conf和初始化ngx_core_module_init_conf。放置在ngx_module_s->ctx。
+
+```c
+/**
+ * 核心模块core数据结构
+ * ngx_module_s->ctx 核心模块的上下文，主要定义了创建配置和初始化配置的结构
+ */
+typedef struct {
+    ngx_str_t             name;
+    void               *(*create_conf)(ngx_cycle_t *cycle);
+    char               *(*init_conf)(ngx_cycle_t *cycle, void *conf);
+} ngx_core_module_t;
+```
+
+```c
+/**
+ * 核心模块配置文件
+ * ngx_core_module_create_conf 核心模块创建配置文件
+ * ngx_core_module_init_conf 核心模块初始化配置文件
+ */
+static ngx_core_module_t  ngx_core_module_ctx = {
+    ngx_string("core"),
+    ngx_core_module_create_conf,
+    ngx_core_module_init_conf
+};
+ 
+/**
+ * 核心模块
+ */
+ngx_module_t  ngx_core_module = {
+    NGX_MODULE_V1,
+    &ngx_core_module_ctx,                  /* module context */
+    ngx_core_commands,                     /* module directives */
+    NGX_CORE_MODULE,                       /* module type */
+    NULL,                                  /* init master */
+    NULL,                                  /* init module */
+    NULL,                                  /* init process */
+    NULL,                                  /* init thread */
+    NULL,                                  /* exit thread */
+    NULL,                                  /* exit process */
+    NULL,                                  /* exit master */
+    NGX_MODULE_V1_PADDING
+};
+```
+
+#### 3.模块初始化
+
+##### 1.模块编号处理ngx_preinit_modules
+
+​	在nginx.c的main函数中，第一步对模块的处理就是进行编号处理。仅仅是编号，不做任何其他处理。
+
+```c
+ /* 初始化所有模块；并对所有模块进行编号处理；
+  * ngx_modules数却是在自动编译的时候生成的，位于objs/ngx_modules.c文件中   */
+if (ngx_preinit_modules() != NGX_OK) {
+        return 1;
+}
+```
+
+ngx_module.c 具体函数实现
+
+```c
+/**
+ * 初始化所有模块；并对所有模块进行编号处理；
+ */
+ngx_int_t
+ngx_preinit_modules(void)
+{
+    ngx_uint_t  i;
+ 
+    for (i = 0; ngx_modules[i]; i++) {
+        ngx_modules[i]->index = i;
+        ngx_modules[i]->name = ngx_module_names[i];
+    }
+ 
+    ngx_modules_n = i;
+    ngx_max_module = ngx_modules_n + NGX_MAX_DYNAMIC_MODULES;
+ 
+    return NGX_OK;
+}
+```
+
+我们可以看到，模块的个数是通过**ngx_modules的数组**
+
+ngx_modules是一个引用外部的变量。在ngx_modules.h中
+
+```
+/* 模块数组，所有的模块都会保存在此数组中   共有四种类型模块："CORE","CONF","EVNT","HTTP" */
+extern ngx_module_t  *ngx_modules[];
+```
+
+而ngx_modules的模块到底是什么时候确定的呢？
+
+1.具体的模块*可通过编译前的**configure**命令进行配置，即设置哪些模块需要编译，哪些不被编译*。当编译的时候，会生成ngx_modules.c的文件，里面就包含模块数组。
+
+2.新增模块或者减少模块可以在*configure**命令*执行前 **auto/modules文件**里面修改。
+
+生成的objs/ngx_modules.c文件如下：
+
+```c
+00001:
+00002: #include <ngx_config.h>
+00003: #include <ngx_core.h>
+00004:
+00005:
+00006:
+00007: extern ngx_module_t ngx_core_module;
+00008: extern ngx_module_t ngx_errlog_module;
+00009: extern ngx_module_t ngx_conf_module;
+00010: extern ngx_module_t ngx_events_module;
+00011: extern ngx_module_t ngx_event_core_module;
+00012: extern ngx_module_t ngx_epoll_module;
+00013: extern ngx_module_t ngx_http_module;
+00014: extern ngx_module_t ngx_http_core_module;
+00015: extern ngx_module_t ngx_http_log_module;
+00016: extern ngx_module_t ngx_http_upstream_module;
+00017: extern ngx_module_t ngx_http_static_module;
+00018: extern ngx_module_t ngx_http_autoindex_module;
+00019: extern ngx_module_t ngx_http_index_module;
+00020: extern ngx_module_t ngx_http_auth_basic_module;
+00021: extern ngx_module_t ngx_http_access_module;
+00022: extern ngx_module_t ngx_http_limit_zone_module;
+00023: extern ngx_module_t ngx_http_limit_req_module;
+00024: extern ngx_module_t ngx_http_geo_module;
+00025: extern ngx_module_t ngx_http_map_module;
+00026: extern ngx_module_t ngx_http_split_clients_module;
+00027: extern ngx_module_t ngx_http_referer_module;
+00028: extern ngx_module_t ngx_http_rewrite_module;
+00029: extern ngx_module_t ngx_http_proxy_module;
+00030: extern ngx_module_t ngx_http_fastcgi_module;
+00031: extern ngx_module_t ngx_http_uwsgi_module;
+00032: extern ngx_module_t ngx_http_scgi_module;
+00033: extern ngx_module_t ngx_http_memcached_module;
+00034: extern ngx_module_t ngx_http_empty_gif_module;
+00035: extern ngx_module_t ngx_http_browser_module;
+00036: extern ngx_module_t ngx_http_upstream_ip_hash_module;
+00037: extern ngx_module_t ngx_http_stub_status_module;
+00038: extern ngx_module_t ngx_http_write_filter_module;
+00039: extern ngx_module_t ngx_http_header_filter_module;
+00040: extern ngx_module_t ngx_http_chunked_filter_module;
+00041: extern ngx_module_t ngx_http_range_header_filter_module;
+00042: extern ngx_module_t ngx_http_gzip_filter_module;
+00043: extern ngx_module_t ngx_http_postpone_filter_module;
+00044: extern ngx_module_t ngx_http_ssi_filter_module;
+00045: extern ngx_module_t ngx_http_charset_filter_module;
+00046: extern ngx_module_t ngx_http_userid_filter_module;
+00047: extern ngx_module_t ngx_http_headers_filter_module;
+00048: extern ngx_module_t ngx_http_copy_filter_module;
+00049: extern ngx_module_t ngx_http_range_body_filter_module;
+00050: extern ngx_module_t ngx_http_not_modified_filter_module;
+00051:
+```
+
