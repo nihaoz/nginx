@@ -220,31 +220,31 @@
 
 
 struct ngx_module_s {
-    ngx_uint_t            ctx_index;
-    ngx_uint_t            index;
+    ngx_uint_t            ctx_index;	//所属分类标识，nginx的模块分为4种，分别为core,http,event,mail，每个模块的使用的技术也不同
+    ngx_uint_t            index;		//模块计数器，nginx为了方便管理模块，定义了同一个存放所有模块的数组ngx_module[]
 
-    char                 *name;
+    char                 *name;			//模块名字
 
     ngx_uint_t            spare0;
     ngx_uint_t            spare1;
 
-    ngx_uint_t            version;
-    const char           *signature;
+    ngx_uint_t            version;		//版本
+    const char           *signature;	
 
-    void                 *ctx;
-    ngx_command_t        *commands;
-    ngx_uint_t            type;
+    void                 *ctx;			//模块上下文，不同模块上下文模块不同
+    ngx_command_t        *commands;		//模块支持的命令集
+    ngx_uint_t            type;			//大模块的种类
 
-    ngx_int_t           (*init_master)(ngx_log_t *log);
+    ngx_int_t           (*init_master)(ngx_log_t *log); 	//主进程初始化时候调用的函数	
 
-    ngx_int_t           (*init_module)(ngx_cycle_t *cycle);
+    ngx_int_t           (*init_module)(ngx_cycle_t *cycle);	//模块初始化调用
 
-    ngx_int_t           (*init_process)(ngx_cycle_t *cycle);
-    ngx_int_t           (*init_thread)(ngx_cycle_t *cycle);
-    void                (*exit_thread)(ngx_cycle_t *cycle);
-    void                (*exit_process)(ngx_cycle_t *cycle);
+    ngx_int_t           (*init_process)(ngx_cycle_t *cycle);	// 工作进程初始化时调用
+    ngx_int_t           (*init_thread)(ngx_cycle_t *cycle);		// 线程初始化时调用
+    void                (*exit_thread)(ngx_cycle_t *cycle);		// 线程退出时调用
+    void                (*exit_process)(ngx_cycle_t *cycle);	// 工作进程退出时调用
 
-    void                (*exit_master)(ngx_cycle_t *cycle);
+    void                (*exit_master)(ngx_cycle_t *cycle);		// 主进程退出时调用
 
     uintptr_t             spare_hook0;
     uintptr_t             spare_hook1;

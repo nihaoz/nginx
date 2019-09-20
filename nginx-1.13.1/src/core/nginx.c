@@ -325,6 +325,12 @@ main(int argc, char *const *argv)
 
     ngx_cycle = cycle;
 
+	/*
+		获取模块配置信息
+			cycle->conf_ctx主要存储的是各个模块的配置文件结构的指针地址。
+
+​			cycle->conf_ctx中获取各个模块配置信息都是通过模块的标识来确定数组位置的
+	*/
     ccf = (ngx_core_conf_t *) ngx_get_conf(cycle->conf_ctx, ngx_core_module);
 
     if (ccf->master && ngx_process == NGX_PROCESS_SINGLE) {

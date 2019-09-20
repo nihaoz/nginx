@@ -4559,7 +4559,7 @@ ccf = (ngx_core_conf_t *) ngx_get_conf(cycle->conf_ctx, ngx_core_module);
 
 3.type。模块类型。
 
-4.nit_module：初始化模块的时候会回调的函数。
+4.init_module：初始化模块的时候会回调的函数。
 
 #### 2.ngx_core_module 核心模块
 
@@ -4660,7 +4660,7 @@ extern ngx_module_t  *ngx_modules[];
 
 1.具体的模块*可通过编译前的**configure**命令进行配置，即设置哪些模块需要编译，哪些不被编译*。当编译的时候，会生成ngx_modules.c的文件，里面就包含模块数组。
 
-2.新增模块或者减少模块可以在*configure**命令*执行前 **auto/modules文件**里面修改。
+2.新增模块或者减少模块可以在**configure**命令*执行前 **auto/modules文件**里面修改。
 
 生成的objs/ngx_modules.c文件如下：
 
@@ -4716,6 +4716,168 @@ extern ngx_module_t  *ngx_modules[];
 00049: extern ngx_module_t ngx_http_range_body_filter_module;
 00050: extern ngx_module_t ngx_http_not_modified_filter_module;
 00051:
+```
+
+#### 4.初始化cycle->modules 分配内存
+
+​	主要在cycle->modules上分配一块用于存放ngx_module_s数据结构的列表内存。并且将原来的 ngx_modules拷贝到cycle->modules上。
+
+ngx_cycle.c
+
+```c
+  /* 创建模块以及创建模块的配置信息 */
+    if (ngx_cycle_modules(cycle) != NGX_OK) {
+        ngx_destroy_pool(pool);
+        return NULL;
+    }
+```
+
+ngx_modules.c
+
+```c
+/**
+ * ngx_init_cycle 在初始化cycle的时候，初始化模块
+ * 创建一个列表，并将静态的模块拷贝到列表上
+ */
+ngx_int_t
+ngx_cycle_modules(ngx_cycle_t *cycle)
+{
+    /*
+     * create a list of modules to be used for this cycle,
+     * copy static modules to it
+     */
+ 
+    cycle->modules = ngx_pcalloc(cycle->pool, (ngx_max_module + 1)
+                                              * sizeof(ngx_module_t *));
+    if (cycle->modules == NULL) {
+        return NGX_ERROR;
+    }
+ 
+    ngx_memcpy(cycle->modules, ngx_modules,
+               ngx_modules_n * sizeof(ngx_module_t *));
+ 
+    cycle->modules_n = ngx_modules_n;
+ 
+    return NGX_OK;
+}
+```
+
+#### 5.每个模块进行初始化ngx_init_modules
+
+1. ngx_module_s结构中定义了init_module的模块初始化回调函数。ngx_init_modules主要用于每个模块的初始化工作。
+
+2. 在编写自定义模块的时候，可以定义init_module方法，主要用于这个模块的初始化工作。
+
+ngx_cycle.c
+
+```c
+/* 调用每个模块的初始化函数 */
+    if (ngx_init_modules(cycle) != NGX_OK) {
+        /* fatal */
+        exit(1);
+    }
+```
+
+```c
+/**
+ * 对每个模块进行一次初始化操作
+ * 调用 init_module 回调函数，初始化每个模块的数据
+ */
+ngx_int_t
+ngx_init_modules(ngx_cycle_t *cycle)
+{
+    ngx_uint_t  i;
+ 
+    for (i = 0; cycle->modules[i]; i++) {
+        if (cycle->modules[i]->init_module) {
+            if (cycle->modules[i]->init_module(cycle) != NGX_OK) {
+                return NGX_ERROR;
+            }
+        }
+    }
+ 
+    return NGX_OK;
+}
+```
+
+#### 6.统计有多少个模块ngx_count_modules
+
+```c
+/**
+ * 统计每个类型下面总共多少个模块
+ */
+ngx_int_t
+ngx_count_modules(ngx_cycle_t *cycle, ngx_uint_t type)
+{
+    ngx_uint_t     i, next, max;
+    ngx_module_t  *module;
+ 
+    next = 0;
+    max = 0;
+ 
+    /* count appropriate modules, set up their indices */
+ 
+    for (i = 0; cycle->modules[i]; i++) {
+        module = cycle->modules[i];
+ 
+        if (module->type != type) {
+            continue;
+        }
+ 
+        if (module->ctx_index != NGX_MODULE_UNSET_INDEX) {
+ 
+            /* if ctx_index was assigned, preserve it */
+ 
+            if (module->ctx_index > max) {
+                max = module->ctx_index;
+            }
+ 
+            if (module->ctx_index == next) {
+                next++;
+            }
+ 
+            continue;
+        }
+ 
+        /* search for some free index */
+ 
+        module->ctx_index = ngx_module_ctx_index(cycle, type, next);
+ 
+        if (module->ctx_index > max) {
+            max = module->ctx_index;
+        }
+ 
+        next = module->ctx_index + 1;
+    }
+ 
+    /*
+     * make sure the number returned is big enough for previous
+     * cycle as well, else there will be problems if the number
+     * will be stored in a global variable (as it's used to be)
+     * and we'll have to roll back to the previous cycle
+     */
+ 
+    if (cycle->old_cycle && cycle->old_cycle->modules) {
+ 
+        for (i = 0; cycle->old_cycle->modules[i]; i++) {
+            module = cycle->old_cycle->modules[i];
+ 
+            if (module->type != type) {
+                continue;
+            }
+ 
+            if (module->ctx_index > max) {
+                max = module->ctx_index;
+            }
+        }
+    }
+ 
+    /* prevent loading of additional modules */
+ 
+    cycle->modules_used = 1;
+ 
+    return max + 1;
+}
 ```
 
 ### 13.Nginx解析配置文件
@@ -4886,3 +5048,284 @@ struct ngx_cycle_s {
 index：是模块的索引值。
 
 commands：模块支持的命令集。主要用于将配置信息设置到每个模块的配置文件数据结构上（例如核心模块的ngx_core_conf_t）。
+
+```c
+/**
+ * 业务模块数据结构
+ */
+struct ngx_module_s {
+    ngx_uint_t            ctx_index;
+    ngx_uint_t            index; /* 模块的唯一标识符号 */
+ 
+    char                 *name;  /* 模块名称 */
+    ...
+    void                 *ctx;	/* 模块上下文 */
+    ngx_command_t        *commands; /* 模块支持的命令集 */
+    ngx_uint_t            type;	/* 模块类型 */
+    ...
+};
+```
+
+#### ngx_command_s 命令集的结构
+
+set：为回调函数。最终设置值的时候，都会调用set的回调函数。
+
+```c
+/**
+ * 模块支持的命令集结构
+ */
+struct ngx_command_s {
+    ngx_str_t             name; /* 命令名称 */
+    ngx_uint_t            type; /* 命令类别 */
+    char               *(*set)(ngx_conf_t *cf, ngx_command_t *cmd, void *conf); /* set回调函数 */
+    ngx_uint_t            conf;
+    ngx_uint_t            offset; /* 偏移量，命令长度 */
+    void                 *post; /* 支持的回调方法；大多数情况为NULL*/
+};
+```
+
+#### 核心模块的定义
+
+​	从上面的数据结构我们知道，每个模块都必须定义一个模块的数据结构ngx_module_s，主要用于管理每个模块的具体信息；每个模块也会定义一个ngx_command_t数组，主要用于存放需要解析的命令集的规则。
+
+​	而最终的配置文件信息，由于每个模块的配置结构不同，所以在cycle->conf_ctx只保存每个模块配置文件数据结构的指针地址。
+
+​	核心模块在nginx.c的文件头部
+
+```c
+/**
+ * 定义核心配置模块命令集ngx_command_t结构
+ */
+static ngx_command_t  ngx_core_commands[] = {
+ 
+    { ngx_string("daemon"), /* 命令名称 */
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_FLAG, /* 类型 */
+      ngx_conf_set_flag_slot, /* 回调方法 */
+      0,
+      offsetof(ngx_core_conf_t, daemon), /* 偏移量；使用这个偏移量后，可以参考 ngx_core_module_create_conf*/
+      NULL },
+ 
+    { ngx_string("master_process"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      0,
+      offsetof(ngx_core_conf_t, master),
+      NULL },
+ 
+    { ngx_string("timer_resolution"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_msec_slot,
+      0,
+      offsetof(ngx_core_conf_t, timer_resolution),
+      NULL },
+ 
+    { ngx_string("pid"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      0,
+      offsetof(ngx_core_conf_t, pid),
+      NULL },
+ 
+    { ngx_string("lock_file"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      0,
+      offsetof(ngx_core_conf_t, lock_file),
+      NULL },
+ 
+    { ngx_string("worker_processes"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_set_worker_processes,
+      0,
+      0,
+      NULL },
+ 
+    { ngx_string("debug_points"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_enum_slot,
+      0,
+      offsetof(ngx_core_conf_t, debug_points),
+      &ngx_debug_points },
+ 
+    { ngx_string("user"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE12,
+      ngx_set_user,
+      0,
+      0,
+      NULL },
+ 
+    { ngx_string("worker_priority"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_set_priority,
+      0,
+      0,
+      NULL },
+ 
+    { ngx_string("worker_cpu_affinity"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_1MORE,
+      ngx_set_cpu_affinity,
+      0,
+      0,
+      NULL },
+ 
+    { ngx_string("worker_rlimit_nofile"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_num_slot,
+      0,
+      offsetof(ngx_core_conf_t, rlimit_nofile),
+      NULL },
+ 
+    { ngx_string("worker_rlimit_core"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_off_slot,
+      0,
+      offsetof(ngx_core_conf_t, rlimit_core),
+      NULL },
+ 
+    { ngx_string("working_directory"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      0,
+      offsetof(ngx_core_conf_t, working_directory),
+      NULL },
+ 
+    { ngx_string("env"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_set_env,
+      0,
+      0,
+      NULL },
+ 
+    { ngx_string("load_module"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_load_module,
+      0,
+      0,
+      NULL },
+ 
+      ngx_null_command
+};
+ 
+/**
+ * 核心模块上下文
+ * ngx_core_module_create_conf 核心模块创建配置文件
+ * ngx_core_module_init_conf 核心模块初始化配置文件
+ */
+static ngx_core_module_t  ngx_core_module_ctx = {
+    ngx_string("core"),
+    ngx_core_module_create_conf,
+    ngx_core_module_init_conf
+};
+ 
+/**
+ * 核心模块
+ */
+ngx_module_t  ngx_core_module = {
+    NGX_MODULE_V1,
+    &ngx_core_module_ctx,                  /* module context */
+    ngx_core_commands,                     /* module directives */
+    NGX_CORE_MODULE,                       /* module type */
+    NULL,                                  /* init master */
+    NULL,                                  /* init module */
+    NULL,                                  /* init process */
+    NULL,                                  /* init thread */
+    NULL,                                  /* exit thread */
+    NULL,                                  /* exit process */
+    NULL,                                  /* exit master */
+    NGX_MODULE_V1_PADDING
+};
+```
+
+说明：
+1. ngx_core_module 核心模块。主要管理核心模块的信息。
+
+2. ngx_core_module_ctx 核心模块的上下文。每个模块的上下文都不同，所以模块结构中只给了一个void的指针类型，可以指向不同的数据结构。核心模块的ngx_core_module_ctx主要定义了ngx_core_module_create_conf和ngx_core_module_init_conf回调函数（创建和初始化配置文件）
+
+3. ngx_core_commands 核心模块定义的命令集。当nginx.conf中的命令被拆简后，会通过这个命令集，逐个将核心模块的命令赋值到核心模块的配置文件数据结构上。
+
+
+#### 核心模块的配置结构ngx_core_conf_t
+
+​	核心模块的配置结构ngx_core_conf_t。ngx_core_conf_t的指针地址会按照模块的index索引，放在cycle->conf_ctx数组中。
+
+​	ngx_core_conf_t结构的创建和初始化，ngx_core_module_create_conf和ngx_core_module_init_conf方法
+
+```c
+/**
+ * 核心配置文件信息
+ * 对应nginx.conf的
+ * #user  nobody;
+	worker_processes  1;
+	#error_log  logs/error.log;
+	#error_log  logs/error.log  notice;
+	#error_log  logs/error.log  info;
+	#pid        logs/nginx.pid;
+ */
+typedef struct {
+    ngx_flag_t                daemon;
+    ngx_flag_t                master;
+ 
+    ngx_msec_t                timer_resolution;
+ 
+    ngx_int_t                 worker_processes;
+    ngx_int_t                 debug_points;
+ 
+    ngx_int_t                 rlimit_nofile;
+    off_t                     rlimit_core;
+ 
+    int                       priority;
+ 
+    ngx_uint_t                cpu_affinity_auto;
+    ngx_uint_t                cpu_affinity_n;
+    ngx_cpuset_t             *cpu_affinity;
+ 
+    char                     *username;
+    ngx_uid_t                 user;
+    ngx_gid_t                 group;
+ 
+    ngx_str_t                 working_directory;
+    ngx_str_t                 lock_file;
+ 
+    ngx_str_t                 pid;
+    ngx_str_t                 oldpid;
+ 
+    ngx_array_t               env;
+    char                    **environment;
+} ngx_core_conf_t;
+```
+
+#### 具体解析流程
+
+我们这边主要讲解核心模块配置信息的解析。通过对核心模块的解析流程的理解，能更好的帮助你了解整个Nginx的模块管理和配置管理的流程。HTTP等模块的配置文件解析会更加复杂一些，但是基本原理是一致的。
+
+1. 创建核心模块配置文件数据结构ngx_core_conf_t
+ngx_init_cycle全局变量的初始化中会初始化Nginx的核心模块的配置信息。核心模块的配置参数在nginx.conf文件中最顶层的一些参数配置。
+
+下面这段代码我们可以看到，遍历模块数组，如果是核心模块，则获取核心模块的上下文cycle->modules[i]->ctx，核心模块上下文是一个自定义的数据结构ngx_core_module_ctx，里面包含了配置文件创建的回调函数ngx_core_module_create_conf 
+
+PS：这边只是针对性NGX_CORE_MODULE进行创建配置文件和初始化配置文件。
+
+```c
+/*
+     * 核心模块的配置文件创建
+     * 配置创建调用nginx.c 中的 ngx_core_module_create_conf
+     * 以及其他核心模块的init_conf，例如：ngx_event_core_module_ctx中的ngx_event_core_create_conf
+     * */
+    for (i = 0; cycle->modules[i]; i++) {
+        if (cycle->modules[i]->type != NGX_CORE_MODULE) {
+            continue;
+        }
+ 
+        module = cycle->modules[i]->ctx;
+ 
+        if (module->create_conf) {
+            rv = module->create_conf(cycle); //模块回调函数，创建模块的配置信息
+            if (rv == NULL) {
+                ngx_destroy_pool(pool);
+                return NULL;
+            }
+            cycle->conf_ctx[cycle->modules[i]->index] = rv; //配置文件复制
+        }
+    }
+```
+
